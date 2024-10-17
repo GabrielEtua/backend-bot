@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -20,6 +18,7 @@ import (
 
 // Variables globales
 var courseCollection *mongo.Collection
+var synonyms []string // Lista donde guardamos palabras clave relevantes (categoría, título, descripción).
 
 // Cargar variables de entorno
 func loadEnv() {
@@ -44,40 +43,82 @@ func connectToMongoDB() {
 	fmt.Println("Connected to MongoDB!")
 }
 
-// Función para consultar cursos en la base de datos por categoría
-// Función para consultar cursos en la base de datos por categoría, título o descripción
-// Función para consultar cursos en la base de datos por categoría, título o descripción
+// Recopilar todos los cursos y generar los sinónimos
+func loadCoursesAndSynonyms() {
+	var courses []map[string]interface{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := courseCollection.Find(ctx, bson.M{})
+	if err != nil {
+		log.Fatalf("Error retrieving courses: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var course map[string]interface{}
+		if err := cursor.Decode(&course); err != nil {
+			log.Fatalf("Error decoding course: %v", err)
+		}
+		courses = append(courses, course)
+
+		// Extraer y almacenar las categorías, títulos y descripciones en la lista de sinónimos
+		category := course["category"].(string)
+		title := course["title"].(string)
+		description := course["description"].(string)
+
+		// Añadir a la lista de sinónimos solo palabras clave importantes
+		addIfUnique(category)
+		extractAndAddKeywords(title)
+		extractAndAddKeywords(description)
+	}
+
+	// Imprimir los sinónimos recopilados
+	log.Printf("Synonyms collected: %v", synonyms)
+}
+
+// Añadir a la lista de sinónimos si no existe ya
+func addIfUnique(synonym string) {
+	synonym = strings.ToLower(synonym)
+	for _, existingSynonym := range synonyms {
+		if existingSynonym == synonym {
+			return
+		}
+	}
+	synonyms = append(synonyms, synonym)
+}
+
+// Extraer palabras clave importantes del título o descripción
+func extractAndAddKeywords(text string) {
+	// Simulamos un análisis básico de palabras clave, podría mejorarse con un analizador léxico más avanzado
+	keywords := []string{"curso", "desarrollo", "web", "programación", "móviles", "python", "javascript", "frontend", "backend"}
+
+	// Dividimos el texto en palabras
+	words := strings.Fields(strings.ToLower(text))
+
+	for _, word := range words {
+		// Si la palabra es clave, la añadimos a los sinónimos
+		for _, keyword := range keywords {
+			if strings.Contains(word, keyword) {
+				addIfUnique(word)
+			}
+		}
+	}
+}
+
 // Función para consultar cursos en la base de datos por categoría, título o descripción
 func getCoursesByCategory(category string) ([]map[string]interface{}, error) {
 	var courses []map[string]interface{}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Palabras clave alternativas o sinónimos que podemos considerar
-	synonyms := []string{"backend", "servidor", "API", "fullstack", "desarrollo"}
-
-	// Ampliar la búsqueda a título, descripción y sinónimos
 	orConditions := []bson.M{
 		{"category": bson.M{"$regex": category, "$options": "i"}},
 		{"title": bson.M{"$regex": category, "$options": "i"}},
 		{"description": bson.M{"$regex": category, "$options": "i"}},
 	}
 
-	// Añadir sinónimos a la búsqueda
-	for _, synonym := range synonyms {
-		orConditions = append(orConditions, bson.M{
-			"$or": []bson.M{
-				{"category": bson.M{"$regex": synonym, "$options": "i"}},
-				{"title": bson.M{"$regex": synonym, "$options": "i"}},
-				{"description": bson.M{"$regex": synonym, "$options": "i"}},
-			},
-		})
-	}
-
 	filter := bson.M{"$or": orConditions}
-
-	// Imprime el filtro en los logs para depuración
-	log.Printf("Filter being used for category search: %+v\n", filter)
 
 	cursor, err := courseCollection.Find(ctx, filter)
 	if err != nil {
@@ -103,110 +144,7 @@ func getCoursesByCategory(category string) ([]map[string]interface{}, error) {
 	return courses, nil
 }
 
-// Función para ordenar cursos por precio
-func getCoursesOrderedByPrice(order string) ([]map[string]interface{}, error) {
-	var courses []map[string]interface{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var sortOrder int
-	if strings.Contains(order, "barato") {
-		sortOrder = 1 // Ascendente
-	} else {
-		sortOrder = -1 // Descendente
-	}
-
-	options := options.Find().SetSort(bson.D{{"price", sortOrder}})
-	cursor, err := courseCollection.Find(ctx, bson.M{}, options)
-	if err != nil {
-		return nil, fmt.Errorf("Error retrieving courses by price: %v", err)
-	}
-	defer cursor.Close(ctx)
-
-	for cursor.Next(ctx) {
-		var course map[string]interface{}
-		if err := cursor.Decode(&course); err != nil {
-			return nil, fmt.Errorf("Error decoding course: %v", err)
-		}
-		courses = append(courses, course)
-	}
-
-	return courses, nil
-}
-
-// Función para ordenar cursos por fecha
-func getCoursesOrderedByDate(order string) ([]map[string]interface{}, error) {
-	var courses []map[string]interface{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var sortOrder int
-	if strings.Contains(order, "nuevo") || strings.Contains(order, "reciente") {
-		sortOrder = -1 // Nuevos primero
-	} else {
-		sortOrder = 1 // Antiguos primero
-	}
-
-	options := options.Find().SetSort(bson.D{{"createdat", sortOrder}})
-	cursor, err := courseCollection.Find(ctx, bson.M{}, options)
-	if err != nil {
-		return nil, fmt.Errorf("Error retrieving courses by date: %v", err)
-	}
-	defer cursor.Close(ctx)
-
-	for cursor.Next(ctx) {
-		var course map[string]interface{}
-		if err := cursor.Decode(&course); err != nil {
-			return nil, fmt.Errorf("Error decoding course: %v", err)
-		}
-		courses = append(courses, course)
-	}
-
-	return courses, nil
-}
-
-// Función para consultar la API de ChatGPT
-func chatGPTQuery(question string) (string, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("API key not found")
-	}
-
-	url := "https://api.openai.com/v1/chat/completions"
-	requestBody, _ := json.Marshal(map[string]interface{}{
-		"model": "gpt-3.5-turbo",
-		"messages": []map[string]string{
-			{"role": "system", "content": "You are a helpful assistant."},
-			{"role": "user", "content": question},
-		},
-	})
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := ioutil.ReadAll(resp.Body)
-	var result map[string]interface{}
-	json.Unmarshal(body, &result)
-
-	choices := result["choices"].([]interface{})
-	message := choices[0].(map[string]interface{})["message"].(map[string]interface{})["content"].(string)
-
-	return message, nil
-}
-
-// Endpoint para manejar preguntas de los usuarios
+// Función para manejar la consulta del usuario
 func chatHandler(w http.ResponseWriter, r *http.Request) {
 	question := r.URL.Query().Get("question")
 	if question == "" {
@@ -214,100 +152,32 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Si la consulta no contiene palabras clave, interpretarla con ChatGPT
-	if !containsKeywords(question, []string{"curso", "recomendar", "barato", "caro", "programación"}) {
-		interpretedQuestion, err := chatGPTQuery("Interpreta esta consulta y relaciona con cursos: " + question)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		question = interpretedQuestion
-	}
-
-	// Procesar la respuesta de ChatGPT para obtener términos clave y ajustar la consulta a MongoDB
-	categoryFromAI := extractCategoryFromAI(question)
-
-	// Si ChatGPT sugirió una categoría o contexto, usarlo
-	if categoryFromAI != "" {
-		courses, err := getCoursesByCategory(categoryFromAI)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if len(courses) == 0 {
+	// Verificar si la pregunta contiene alguna de las palabras clave almacenadas
+	for _, synonym := range synonyms {
+		if strings.Contains(strings.ToLower(question), synonym) {
+			// Encontrar y devolver los cursos relacionados con el sinónimo encontrado
+			courses, err := getCoursesByCategory(synonym)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(courses) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]string{"response": "No se encontraron cursos en esta categoría."})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"response": "No se encontraron cursos en esta categoría."})
+			json.NewEncoder(w).Encode(courses)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(courses)
-		return
 	}
 
 	// Si no se detecta nada relevante en la consulta, hacer un manejo genérico
 	handleCourseRequest(w, question)
 }
 
-// Función para extraer la categoría sugerida por ChatGPT a partir de la respuesta interpretada
-func extractCategoryFromAI(question string) string {
-	// Usamos palabras clave que puedan haber sido sugeridas por ChatGPT
-	categories := []string{"programación", "frontend", "backend", "web", "desarrollo", "móviles"}
-
-	for _, category := range categories {
-		if strings.Contains(strings.ToLower(question), category) {
-			return category
-		}
-	}
-	return ""
-}
-
 func handleCourseRequest(w http.ResponseWriter, question string) {
-	// Manejo de consultas por categoría
-	if containsKeywords(question, []string{"programación", "frontend", "backend"}) {
-		courses, err := getCoursesByCategory(question)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		if len(courses) == 0 {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"response": "No se encontraron cursos en esta categoría."})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(courses)
-		return
-	}
-
-	// Ordenar cursos por precio
-	if containsKeywords(question, []string{"barato", "caro", "precio"}) {
-		courses, err := getCoursesOrderedByPrice(question)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(courses)
-		return
-	}
-
-	// Ordenar cursos por fecha
-	if containsKeywords(question, []string{"nuevo", "reciente", "antiguo"}) {
-		courses, err := getCoursesOrderedByDate(question)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(courses)
-		return
-	}
-
-	// Si la consulta no tiene relación con cursos, devuelve un mensaje de error
+	// Manejo genérico, por ejemplo, ordenando por precio o fecha.
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"response": "No se encontraron cursos relacionados con tu búsqueda."})
 }
@@ -330,6 +200,9 @@ func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	loadEnv()
 	connectToMongoDB()
+
+	// Cargar todos los cursos y sinónimos al iniciar la aplicación
+	loadCoursesAndSynonyms()
 
 	http.HandleFunc("/health", healthCheckHandler)
 	http.HandleFunc("/chat", chatHandler)
